@@ -1,13 +1,12 @@
 """Parametrizing the bath automatically using character
-table and generators of an abelian/non-abelian point group
-(Pyqcm formalism).
+table and generators of an abelian point group (Pyqcm formalism).
 """
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 
-from point_groups import all_point_groups
+from .point_groups import all_point_groups
 
 
 class BathParametrizer:
@@ -122,6 +121,142 @@ class BathParametrizer:
             bath_parametrization[irrep] = salcs
 
         return bath_parametrization
+
+    def _orbit_filtered_salcs(self, linked_sites: np.ndarray) -> dict:
+        """Select the SALCs from get_bath_parametrization() whose support
+        lies entirely within linked_sites. SALCs seeded from different
+        orbits of the site-permutation representation are already
+        linearly independent and orbit-localized, so this only selects
+        among existing SALCs; it never rescales or zeroes coefficients.
+
+        Survivors are labelled 'irrep' if only one orbit of that irrep
+        survives, or 'irrep_1', 'irrep_2', ... if more than one does.
+
+        Raises ValueError if a SALC's support partially overlaps
+        linked_sites (linked_sites is not a union of point-group orbits),
+        or if no SALC survives the filter.
+        """
+        linked = {int(i) for i in linked_sites}
+        bath_param = self.get_bath_parametrization()
+
+        survivors = {}
+        for irrep, salc_list in bath_param.items():
+            kept = []
+            for salc in salc_list:
+                support = {
+                    i for i in range(len(salc)) if not np.isclose(abs(salc[i]), 0)
+                }
+                if support.issubset(linked):
+                    kept.append(salc)
+                elif support & linked:
+                    raise ValueError(
+                        f"linked_sites {sorted(linked)} partially overlaps "
+                        f"the support {sorted(support)} of a '{irrep}' "
+                        "SALC; linked_sites must be a union of point-group "
+                        "orbits."
+                    )
+            if kept:
+                survivors[irrep] = kept
+
+        labelled = {}
+        for irrep, kept in survivors.items():
+            if len(kept) == 1:
+                labelled[irrep] = kept[0]
+            else:
+                for k, salc in enumerate(kept):
+                    labelled[f"{irrep}_{k + 1}"] = salc
+
+        if not labelled:
+            raise ValueError(
+                f"No SALCs found with support inside linked_sites {sorted(linked)}."
+            )
+
+        return labelled
+
+    def get_hybridization_links(
+        self,
+        nb: int,
+        subbath: dict | None = None,
+        linked_sites=None,
+    ) -> dict:
+        """Assign bath orbitals to SALCs, per subbath.
+
+        Parameters
+        ----------
+        nb : int
+            Number of bath orbitals per subbath.
+        subbath : dict, optional
+            {"nsb": number of subbaths (default 1),
+             "irreps": "replica" (default), "unique", or "custom"/"mixed"}.
+        linked_sites : sequence of int, optional
+            0-based cluster site indices physically coupled to the bath.
+            Defaults to all sites. Must be a union of point-group orbits
+            (see _orbit_filtered_salcs).
+
+        Returns
+        -------
+        dict
+            {subbath_index (1-based int): {salc_label: {
+                "coefficients": np.ndarray, "n_orbitals": int}}}
+
+        Raises
+        ------
+        ValueError
+            If linked_sites is not a union of orbits, if no SALC survives
+            the filter, if nb/nsb fail the mode's divisibility
+            requirement, or if subbath["irreps"] is not recognized.
+        NotImplementedError
+            If subbath["irreps"] is "custom" or "mixed".
+        """
+        subbath = subbath or {}
+        nsb = subbath.get("nsb", 1)
+        mode = subbath.get("irreps", "replica")
+
+        if linked_sites is None:
+            linked_sites = range(len(self.positions))
+
+        salcs = self._orbit_filtered_salcs(np.asarray(list(linked_sites)))
+        n_units = len(salcs)
+
+        if mode == "replica":
+            if nb % (2 * n_units) != 0:
+                raise ValueError(
+                    f"'replica' mode requires nb ({nb}) to be divisible "
+                    f"by 2 * n_units ({2 * n_units})."
+                )
+            n_orbitals = nb // n_units
+            subbath_links = {
+                label: {"coefficients": salc, "n_orbitals": n_orbitals}
+                for label, salc in salcs.items()
+            }
+            return {sb: dict(subbath_links) for sb in range(1, nsb + 1)}
+
+        if mode == "unique":
+            if nsb % n_units != 0:
+                raise ValueError(
+                    f"'unique' mode requires nsb ({nsb}) to be divisible "
+                    f"by n_units ({n_units})."
+                )
+            if nb % 2 != 0:
+                raise ValueError(f"'unique' mode requires nb ({nb}) to be even.")
+            n = nsb // n_units
+            labels = list(salcs)
+            return {
+                sb: {
+                    labels[(sb - 1) // n]: {
+                        "coefficients": salcs[labels[(sb - 1) // n]],
+                        "n_orbitals": nb,
+                    }
+                }
+                for sb in range(1, nsb + 1)
+            }
+
+        if mode in ("custom", "mixed"):
+            raise NotImplementedError(
+                "custom subbath assignment is not yet implemented"
+            )
+
+        raise ValueError(f"Unknown subbath['irreps'] mode: {mode!r}")
 
     def get_pyqcm_generators(self, n_baths: int, abelian_pg: str) -> dict:
         """Return ready-to-use generators lists for pyqcm.cluster_model per irrep.

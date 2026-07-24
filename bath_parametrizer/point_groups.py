@@ -1,5 +1,5 @@
 """This modules contains information about the considered
-point groups for (SB-)CDMFT simulations, i.e. the character
+point groups for SB-CDMFT simulations, i.e. the character
 tables and groups' operations. Convention for the character
 tables from Bilbao Crystallographic Server (BCS).
 """
