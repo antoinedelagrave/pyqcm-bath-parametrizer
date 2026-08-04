@@ -258,58 +258,90 @@ class BathParametrizer:
 
         raise ValueError(f"Unknown subbath['irreps'] mode: {mode!r}")
 
-    def get_pyqcm_generators(self, n_baths: int, abelian_pg: str) -> dict:
-        """Return ready-to-use generators lists for pyqcm.cluster_model per irrep.
+    def get_pyqcm_generators(
+        self,
+        n_baths: int,
+        abelian_pg: str,
+        subbath: dict | None = None,
+        linked_sites=None,
+    ) -> list | dict:
+        """Return ready-to-use pyqcm.cluster_model generators (bath_irrep=True
+        format): cluster-site permutations combined with bath-orbital phases.
 
-        Combines the cluster-site permutations and the bath-orbital phases into
-        the format expected by pyqcm (bath_irrep=True):
-          - cluster entries: 1-based site permutation indices (pyqcm subtracts 1)
-          - bath entries: phase integers (multiples of 2π/|G|)
-
-        Returns an empty dict for non-abelian point groups or groups without
-        defined generators, signalling that bath_irrep symmetry cannot be used.
+        The bath-orbital-per-SALC split is delegated to get_hybridization_links,
+        so this accepts the same subbath/linked_sites arguments. For each
+        point-group generator, a row is built as:
+          cluster site permutation (1-based) + bath phases, one block per SALC
+          label of the subbath, each phase repeated n_orbitals times.
+        Block order follows the SALC label order returned by
+        get_hybridization_links (character-table order, or 'irrep_1',
+        'irrep_2', ... when an irrep has multiplicity > 1) -- declare
+        eb{i}/tb{i} bath parameters in that same order.
 
         Parameters
         ----------
         n_baths : int
-            Number of bath orbitals per subbath.
+            Total number of bath orbitals (see get_hybridization_links).
+        abelian_pg : str
+            Point group supplying the generators (its .generators dict).
+        subbath : dict, optional
+            Forwarded to get_hybridization_links. Default (nsb=1, 'replica')
+            is the vanilla, non-SB-CDMFT mixed bath.
+        linked_sites : sequence of int, optional
+            Forwarded to get_hybridization_links.
 
         Returns
         -------
-        dict
-            {irrep_label: [[gen0_site_perm..., gen0_bath_phases...], [gen1...], ...]}
-            Empty dict if the point group has no abelian generator structure.
+        list or dict
+            A flat generators list -- [[gen0_site_perm..., gen0_bath_phases...],
+            [gen1...], ...] -- ready for cluster_model(generators=result,
+            bath_irrep=True), when subbath['nsb'] is 1 (the default). When
+            subbath['nsb'] > 1, {subbath_index: generators_list, ...} instead,
+            one flat list per subbath cluster_model.
+            Empty dict if abelian_pg has no defined generators (non-abelian or
+            unsupported point group), signalling that bath_irrep symmetry
+            cannot be used.
         """
         pg = all_point_groups[abelian_pg]
+        if not pg.generators:
+            return {}
+
         G = len(pg.operations)
-        bath_param = self.get_bath_parametrization()
+        links = self.get_hybridization_links(
+            n_baths, subbath=subbath, linked_sites=linked_sites
+        )
 
-        # 1-based cluster-site permutation for each generator
+        # 1-based cluster-site permutation, and permutation matrix, per generator
         cluster_perms = {}
+        generator_matrices = {}
         for gen_name, gen_matrix in pg.generators.items():
-            P = self.build_permutation_repr(gen_matrix)
-            cluster_perms[gen_name] = (np.argmax(P, axis=0) + 1).tolist()
+            generator_matrices[gen_name] = self.build_permutation_repr(gen_matrix)
+            cluster_perms[gen_name] = (
+                np.argmax(generator_matrices[gen_name], axis=0) + 1
+            ).tolist()
 
-        # Bath phase for each (generator, irrep): 0 if symmetric, G//2 if antisymmetric
-        bath_phases = {}
-        for gen_name, gen_matrix in pg.generators.items():
-            P = self.build_permutation_repr(gen_matrix)
-            bath_phases[gen_name] = {}
-            for irrep, salc_list in bath_param.items():
-                coeffs = salc_list[0]
-                projected = P @ coeffs
-                bath_phases[gen_name][irrep] = (
-                    0 if np.allclose(coeffs, projected) else G // 2
+        def phase(gen_name: str, coeffs: np.ndarray) -> int:
+            """0 if coeffs is symmetric under gen_name, G//2 if antisymmetric."""
+            projected = generator_matrices[gen_name] @ coeffs
+            return 0 if np.allclose(coeffs, projected) else G // 2
+
+        def row(gen_name: str, salc_labels: dict) -> list:
+            generator_row = list(cluster_perms[gen_name])
+            for info in salc_labels.values():
+                generator_row.extend(
+                    [phase(gen_name, info["coefficients"])] * info["n_orbitals"]
                 )
+            return generator_row
 
-        # Assemble per-irrep generator lists
-        return {
-            irrep: [
-                cluster_perms[gen_name] + [bath_phases[gen_name][irrep]] * n_baths
-                for gen_name in cluster_perms
-            ]
-            for irrep in bath_param
+        generators_by_subbath = {
+            sb: [row(gen_name, salc_labels) for gen_name in cluster_perms]
+            for sb, salc_labels in links.items()
         }
+
+        nsb = (subbath or {}).get("nsb", 1)
+        if nsb == 1:
+            return generators_by_subbath[1]
+        return generators_by_subbath
 
     def show_parametrized_cluster(self, show: bool = True) -> Axes:
         """Build the cluster figure, one panel per SALC.
