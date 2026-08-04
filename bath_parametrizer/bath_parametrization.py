@@ -23,7 +23,7 @@ class BathParametrizer:
         hardcoded point group data.
         """
         self.point_group = all_point_groups[point_group]
-        self.positions = site_positions
+        self.positions = np.asarray(site_positions, dtype=float)
         self.operations = self.point_group.operations
         self.character_table = self.point_group.character_table
         self.classes_multiplicity = self.point_group.classes_multiplicity
